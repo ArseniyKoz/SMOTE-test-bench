@@ -1,4 +1,4 @@
-# SMOTE-test-brench
+# SMOTE-test-bench
 Тестовый стенд для сравнения oversampling-алгоритмов семейства SMOTE на задачах бинарной классификации с логированием экспериментов в ClearML.
 
 ## Overview
@@ -17,7 +17,7 @@
 - кастомные реализации из `src/methods/classic/*` считаются неактуальными и не входят в текущий benchmark-пайплайн.
 
 ## Requirements
-- Python 3.10+ (рекомендуется 3.11);
+- Python 3.10+;
 - доступ к ClearML Server;
 - настроенные credentials ClearML для текущего окружения.
 
@@ -52,18 +52,6 @@ pip install -r requirements.txt -r requirements-dev.txt
 ```bash
 clearml-init
 ```
-
-## Development Checks
-Базовые проверки перед PR:
-
-```bash
-python -m compileall src experiments configs main.py
-ruff check tests main.py configs/config_loader.py
-black --check tests main.py configs/config_loader.py
-pytest -q
-```
-
-Эти же шаги выполняются в CI (`.github/workflows/ci.yml`).
 
 ## Data Preparation
 Конфиг датасетов: [configs/data/datasets.yaml](./configs/data/datasets.yaml).
@@ -111,11 +99,11 @@ python main.py
 ## Metrics and Evaluation
 В проекте используются метрики качества для имбалансных задач, в том числе:
 - `balanced_accuracy`;
-- `f1_weighted`;
+- `f1_macro`;
 - `g_mean`;
-- `roc_auc_weighted`;
-- `precision_weighted`;
-- `recall_weighted`.
+- `roc_auc_macro`;
+- `precision_macro`;
+- `recall_macro`.
 
 Сравнение проводится в формате:
 - `Original`: обучение на исходной train-выборке;
@@ -151,24 +139,3 @@ SMOTE-test-brench/
 ├─ main.py
 └─ requirements.txt
 ```
-
-## Troubleshooting
-1. `Dataset ID not found` или загрузка датасета не выполняется.
-- Проверьте `data_id` в `configs/data/datasets.yaml`.
-- Убедитесь, что пользователь имеет доступ к датасету в ClearML.
-
-2. Ошибка чтения CSV (`file not found`).
-- Убедитесь, что имя файла внутри датасета совпадает с `dataset` из конфига: `<dataset>.csv`.
-
-3. Ошибки аутентификации ClearML.
-- Повторно выполните `clearml-init`.
-- Проверьте актуальность API key/secret и URL сервера.
-
-4. Нестабильное качество на разных запусках.
-- Проверьте `random_state` в конфиге эксперимента.
-- Убедитесь, что сравниваются одинаковые классификаторы и метрики.
-
-## Roadmap
-- поддержка multiclass-задач;
-- расширение набора встроенных сценариев benchmark;
-- повышение воспроизводимости и покрытие автоматическими тестами.
