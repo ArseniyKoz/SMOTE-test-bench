@@ -1,3 +1,5 @@
+import matplotlib
+matplotlib.use('Agg', force=True)
 import matplotlib.pyplot as plt
 import seaborn as sns
 from clearml import Task
@@ -365,9 +367,10 @@ class Visualiser:
             width=800, height=600
         )
 
-        clearml_task.get_logger().report_plotly(
-            title="Precision-Recall Curve",
-            series="PR",
-            iteration=1,
-            figure=fig
-        )
+        if clearml_task:
+            clearml_task.get_logger().report_plotly(
+                title="Precision-Recall Curve",
+                series="PR",
+                iteration=1,
+                figure=fig
+            )
