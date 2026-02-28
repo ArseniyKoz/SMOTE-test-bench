@@ -1,5 +1,6 @@
 import logging
 import time
+import os
 import numpy as np
 from typing import Any, Dict, Optional, List
 from sklearn.model_selection import StratifiedKFold, train_test_split
@@ -515,7 +516,11 @@ class ExperimentRunner:
 
         if csv_data:
             csv_df = pd.DataFrame(csv_data)
-            csv_filename = f"results/results_summary_{dataset_name}_{smote_algorithm.__class__.__name__}.csv"
+            os.makedirs(self.config.results_dir, exist_ok=True)
+            csv_filename = os.path.join(
+                self.config.results_dir,
+                f"results_summary_{dataset_name}_{smote_algorithm.__class__.__name__}.csv"
+            )
             csv_df.to_csv(csv_filename, index=False, encoding='utf-8')
 
             self.task.upload_artifact('results_summary_csv', csv_filename)
