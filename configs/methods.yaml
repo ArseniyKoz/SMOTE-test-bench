@@ -1,92 +1,155 @@
 Original:
-    method: sv.NoSMOTE()
+  source: smote_variants
+  class: NoSMOTE
+  params: {}
 
 SMOTE:
-    method: sv.SMOTE()
+  source: smote_variants
+  class: SMOTE
+  params: {}
 
 Borderline_SMOTE1:
-    method: sv.Borderline_SMOTE1()
+  source: smote_variants
+  class: Borderline_SMOTE1
+  params: {}
 
 ADASYN:
-    method: sv.ADASYN()
+  source: smote_variants
+  class: ADASYN
+  params: {}
 
 distance_SMOTE:
-    method: sv.distance_SMOTE()
+  source: smote_variants
+  class: distance_SMOTE
+  params: {}
 
 Safe_Level_SMOTE:
-    method: sv.Safe_Level_SMOTE()
+  source: smote_variants
+  class: Safe_Level_SMOTE
+  params: {}
 
 MSMOTE:
-    method: sv.MSMOTE()
+  source: smote_variants
+  class: MSMOTE
+  params: {}
 
 SMBOND:
-    method: sv.SMOBD()
+  source: smote_variants
+  class: SMOBD
+  params: {}
 
 SL_graph_SMOTE:
-    method: sv.SL_graph_SMOTE()
+  source: smote_variants
+  class: SL_graph_SMOTE
+  params: {}
 
 LVQ_SMOTE:
-    method: sv.LVQ_SMOTE()
+  source: smote_variants
+  class: LVQ_SMOTE
+  params: {}
 
 ROSE:
-    method: sv.ROSE()
+  source: smote_variants
+  class: ROSE
+  params: {}
 
 MWMOTE:
-    method: sv.MWMOTE()
+  source: smote_variants
+  class: MWMOTE
+  params: {}
 
 V_SYNTH:
-    method: sv.V_SYNTH()
+  source: smote_variants
+  class: V_SYNTH
+  params: {}
 
 SMOTE_D:
-    method: sv.SMOTE_D()
+  source: smote_variants
+  class: SMOTE_D
+  params: {}
 
 CURE_SMOTE:
-    method: sv.CURE_SMOTE()
+  source: smote_variants
+  class: CURE_SMOTE
+  params: {}
 
 ASMOBD:
-    method: sv.ASMOBD()
+  source: smote_variants
+  class: ASMOBD
+  params: {}
 
 G_SMOTE:
-    method: sv.G_SMOTE()
+  source: smote_variants
+  class: G_SMOTE
+  params: {}
 
 MDO:
-    method: sv.MDO()
+  source: smote_variants
+  class: MDO
+  params: {}
 
 Random_SMOTE:
-    method: sv.Random_SMOTE()
+  source: smote_variants
+  class: Random_SMOTE
+  params: {}
 
 GASMOTE:
-    method: sv.GASMOTE()
+  source: smote_variants
+  class: GASMOTE
+  params: {}
 
 SSO:
-    method: sv.SSO()
+  source: smote_variants
+  class: SSO
+  params: {}
 
 NDO_sampling:
-    method: sv.NDO_sampling()
+  source: smote_variants
+  class: NDO_sampling
+  params: {}
 
 Gaussian_SMOTE:
-    method: sv.Gaussian_SMOTE()
+  source: smote_variants
+  class: Gaussian_SMOTE
+  params: {}
 
 Supervised_SMOTE:
-    method: sv.Supervised_SMOTE()
+  source: smote_variants
+  class: Supervised_SMOTE
+  params: {}
 
 CCR:
-    method: sv.CCR()
+  source: smote_variants
+  class: CCR
+  params: {}
 
 ANS:
-    method: sv.ANS()
+  source: smote_variants
+  class: ANS
+  params: {}
 
 cluster_SMOTE:
-    method: sv.cluster_SMOTE()
+  source: smote_variants
+  class: cluster_SMOTE
+  params: {}
 
 SYMPROD:
-    method: sv.SYMPROD()
+  source: smote_variants
+  class: SYMPROD
+  params: {}
 
 SMOTE_TomekLinks:
-    method: sv.SMOTE_TomekLinks()
+  source: smote_variants
+  class: SMOTE_TomekLinks
+  params: {}
 
 KMeans_SMOTE:
-    method: sv.kmeans_SMOTE()
+  source: smote_variants
+  class: kmeans_SMOTE
+  params: {}
 
 AKMeans_SMOTE:
-    method: __import__('src.methods.classic.akmeans_smote', fromlist=['AKMeansSMOTE']).AKMeansSMOTE()
+  source: local
+  module: src.methods.classic.akmeans_smote
+  class: AKMeansSMOTE
+  params: {}
