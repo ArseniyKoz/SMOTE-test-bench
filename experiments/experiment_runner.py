@@ -1,21 +1,26 @@
-import logging
-import time
-import os
-import numpy as np
-from typing import Any, Dict, Optional, List
-from sklearn.model_selection import StratifiedKFold, train_test_split
-import warnings
+from __future__ import annotations
+
 import json
+import logging
+import subprocess
+import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
 import pandas as pd
 import smote_variants as sv
-from configs.config_loader import ConfigLoader
-
-warnings.filterwarnings('ignore')
 from clearml import Task
-from src.utils.data_loader import fetch_dataset
-from src.utils.preprocessing import SMOTEPreprocessor, PreprocessingConfig
+from sklearn.model_selection import StratifiedKFold, train_test_split
+
+from configs.config_loader import ConfigLoader
+from configs.schemas import MethodDefinitionModel
 from src.evaluation.basic_evaluator import all_smote_metrics
+from src.methods.registry import build_method
+from src.utils.data_loader import fetch_dataset
 from src.utils.visualise import Visualiser
+
+logging.getLogger(sv.__name__).setLevel(logging.WARNING)
 
 
 class ClassifierPool:
@@ -23,529 +28,575 @@ class ClassifierPool:
         self.random_state = random_state
 
     def get_classifiers(self) -> Dict[str, Any]:
+        from catboost import CatBoostClassifier
         from sklearn.ensemble import RandomForestClassifier
-        from sklearn.svm import SVC
-        from sklearn.neighbors import KNeighborsClassifier
         from sklearn.linear_model import LogisticRegression
         from sklearn.naive_bayes import GaussianNB
+        from sklearn.neighbors import KNeighborsClassifier
+        from sklearn.svm import SVC
         from sklearn.tree import DecisionTreeClassifier
-        from catboost import CatBoostClassifier
+
         return {
-            'CatBoost': CatBoostClassifier(
-                random_state=self.random_state,
-                verbose=False,
-            ),
-            'RandomForest': RandomForestClassifier(
-                n_estimators=100,
-                random_state=self.random_state
-            ),
-            'SVM': SVC(
-                kernel='rbf',
-                probability=True,
-                random_state=self.random_state
-            ),
-            'kNN': KNeighborsClassifier(n_neighbors=5),
-            'LogisticRegression': LogisticRegression(
-                random_state=self.random_state,
-                max_iter=1000
-            ),
-            'DecisionTree': DecisionTreeClassifier(
-                random_state=self.random_state
-            ),
-            'NaiveBayes': GaussianNB()
+            "CatBoost": CatBoostClassifier(random_state=self.random_state, verbose=False),
+            "RandomForest": RandomForestClassifier(n_estimators=100, random_state=self.random_state),
+            "SVM": SVC(kernel="rbf", probability=True, random_state=self.random_state),
+            "kNN": KNeighborsClassifier(n_neighbors=5),
+            "LogisticRegression": LogisticRegression(random_state=self.random_state, max_iter=1000),
+            "DecisionTree": DecisionTreeClassifier(random_state=self.random_state),
+            "NaiveBayes": GaussianNB(),
         }
 
 
 class ExperimentConfig:
     def __init__(self, cfg=None):
-        if cfg is None:
-            cfg = {}
+        cfg = cfg or {}
 
-        self.cv_folds = cfg.get('cv_folds', 5)
-        self.random_runs = cfg.get('random_runs', 3)
-        self.test_size = cfg.get('test_size', 0.2)
-        self.random_state = cfg.get('random_state', 42)
+        self.cv_folds = cfg.get("cv_folds", 5)
+        self.random_runs = cfg.get("random_runs", 1)
+        self.test_size = cfg.get("test_size", 0.2)
+        self.random_state = cfg.get("random_state", 42)
 
-        self.priority_metrics = cfg.get('priority_metrics', [
-            'balanced_accuracy', 'f1_weighted', 'g_mean',
-            'roc_auc_weighted', 'precision_weighted', 'recall_weighted'
-        ])
+        self.priority_metrics = cfg.get(
+            "priority_metrics",
+            [
+                "balanced_accuracy",
+                "f1_weighted",
+                "g_mean",
+                "roc_auc_weighted",
+                "precision_weighted",
+                "recall_weighted",
+            ],
+        )
+        self.selected_classifiers = cfg.get(
+            "selected_classifiers",
+            ["RandomForest", "SVM", "kNN", "LogisticRegression"],
+        )
 
-        self.selected_classifiers = cfg.get('selected_classifiers', [
-            'RandomForest', 'SVM', 'kNN', 'LogisticRegression'
-        ])
+        self.results_dir = cfg.get("results_dir", "results")
+        self.save_results = cfg.get("save_results", True)
 
-        self.clearml_project_name = "SMOTE Test Bench"
-        self.clearml_task_name = None
-        self.clearml_tags = None
-        self.auto_log_artifacts = True
-        self.log_model_params = True
+        self.clearml_project_name = cfg.get("clearml_project_name", "SMOTE Test Bench")
+        self.clearml_task_name = cfg.get("clearml_task_name")
+        self.clearml_tags = cfg.get("clearml_tags", [])
+        self.auto_log_artifacts = cfg.get("auto_log_artifacts", True)
 
-        self.enable_scatter_plots = True
-        self.enable_roc_curves = True
-        self.enable_precision_recall_curves = True
+        self.enable_scatter_plots = cfg.get("enable_scatter_plots", True)
+        self.enable_roc_curves = cfg.get("enable_roc_curves", True)
+        self.enable_precision_recall_curves = cfg.get("enable_precision_recall_curves", True)
 
-    def get_config(self) -> Dict:
-        config = {
-            'cv_folds': self.cv_folds,
-            'random_runs': self.random_runs,
-
-            'test_size': self.test_size,
-            'random_state': self.random_state,
-
-            'priority_metrics': self.priority_metrics,
-            'selected_classifiers': self.selected_classifiers,
-
-            'clearml_project_name': self.clearml_project_name,
-            'clearml_task_name': self.clearml_task_name,
-            'clearml_tags': self.clearml_tags,
-            'auto_log_artifacts': self.auto_log_artifacts,
-            'log_model_params': self.log_model_params,
-
-            'enable_scatter_plots': self.enable_scatter_plots,
-            'enable_roc_curves': self.enable_roc_curves,
-            'enable_precision_recall_curves': self.enable_precision_recall_curves
+    def get_config(self) -> Dict[str, Any]:
+        return {
+            "cv_folds": self.cv_folds,
+            "random_runs": self.random_runs,
+            "test_size": self.test_size,
+            "random_state": self.random_state,
+            "priority_metrics": self.priority_metrics,
+            "selected_classifiers": self.selected_classifiers,
+            "results_dir": self.results_dir,
+            "save_results": self.save_results,
+            "clearml_project_name": self.clearml_project_name,
+            "clearml_task_name": self.clearml_task_name,
+            "clearml_tags": self.clearml_tags,
+            "auto_log_artifacts": self.auto_log_artifacts,
+            "enable_scatter_plots": self.enable_scatter_plots,
+            "enable_roc_curves": self.enable_roc_curves,
+            "enable_precision_recall_curves": self.enable_precision_recall_curves,
         }
-
-        return config
 
 
 class ExperimentRunner:
-    def __init__(self,
-                 config: Optional[ExperimentConfig] = None,
-                 create_clearml_task: bool = True,
-                 clearml_task: Optional[Task] = None
-                 ):
-
+    def __init__(
+        self,
+        config: Optional[ExperimentConfig] = None,
+        create_clearml_task: bool = True,
+        clearml_task: Optional[Task] = None,
+    ):
         self.config = config or ExperimentConfig()
         self.create_clearml_task = create_clearml_task
-        self.task = None
+        self.task: Optional[Task] = clearml_task
+        self.logger = self.task.get_logger() if self.task else None
 
-        if create_clearml_task and clearml_task is None:
-            self._initialize_clearml_task()
-            if self.task:
-                self.logger = self.task.get_logger()
-        else:
-            self.task = clearml_task
-            if self.task:
-                self.logger = self.task.get_logger()
+        self.git_sha = self._get_git_sha()
+        self.run_id = self._build_run_id()
 
         self.visualiser = Visualiser()
         if self.task:
             self.visualiser.set_clearml_task(self.task)
 
         self.classifier_pool = ClassifierPool(random_state=self.config.random_state)
-        self.results = {}
-        self.experiment_metadata = {}
-        self.visualisation_counter = 0
 
-    def _initialize_clearml_task(self):
-        task_name = self.config.clearml_task_name or f"SMOTE Experiment {time.strftime('%Y%m%d_%H%M%S')}"
+        self._run_root().mkdir(parents=True, exist_ok=True)
+        self._update_manifest([], extra={"config": self.config.get_config()})
 
-        Task.add_requirements('requirements.txt')
+    def _get_git_sha(self) -> str:
+        try:
+            sha = subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).strip()
+            return sha or "nogit"
+        except Exception:
+            return "nogit"
+
+    def _build_run_id(self) -> str:
+        return f"{time.strftime('%Y%m%d_%H%M%S')}_{self.git_sha}"
+
+    def _run_root(self) -> Path:
+        return Path(self.config.results_dir) / self.run_id
+
+    def _manifest_path(self) -> Path:
+        return self._run_root() / "manifest.json"
+
+    def _initialize_clearml_task(self, task_name: Optional[str] = None):
+        if self.task is not None:
+            return
+
+        if not self.create_clearml_task:
+            return
+
+        Task.add_requirements("requirements.txt")
         self.task = Task.init(
             project_name=self.config.clearml_project_name,
-            task_name=task_name,
-            tags=self.config.clearml_tags
+            task_name=task_name or self.config.clearml_task_name or f"SMOTE Experiment {self.run_id}",
+            tags=self.config.clearml_tags,
         )
+        self.logger = self.task.get_logger()
+        self.task.connect(self.config.get_config(), name="experiment_config")
+        self.visualiser.set_clearml_task(self.task)
 
-        config_dict = self.config.get_config()
-        self.task.connect(config_dict, name='experiment_config')
+    def _update_manifest(self, generated_files: List[str], extra: Optional[Dict[str, Any]] = None):
+        manifest_path = self._manifest_path()
+        if manifest_path.exists():
+            with manifest_path.open("r", encoding="utf-8") as file:
+                manifest = json.load(file)
+        else:
+            manifest = {
+                "run_id": self.run_id,
+                "git_sha": self.git_sha,
+                "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "generated_files": [],
+            }
 
-    def _create_data_scatter_visualisation(self, X_train: np.ndarray, y_train: np.ndarray,
-                                           X_train_smote: np.ndarray, y_train_smote: np.ndarray,
-                                           synthetic_samples: np.ndarray
-                                           ):
-        if self.config.enable_scatter_plots and X_train.shape[1] >= 2:
-            feature_names = [f'Feature {i + 1}' for i in range(X_train.shape[1])]
+        known_files = set(manifest.get("generated_files", []))
+        for rel_path in generated_files:
+            if rel_path not in known_files:
+                manifest["generated_files"].append(rel_path)
+                known_files.add(rel_path)
 
-            X_train_np = X_train.values if hasattr(X_train, 'values') else X_train
-            y_train_np = y_train.values if hasattr(y_train, 'values') else y_train
+        if extra:
+            manifest.update(extra)
 
-            self.visualiser.plot_data_scatter(
-                X_original=X_train_np,
-                y_original=y_train_np,
-                X_smote=X_train_smote,
-                y_smote=y_train_smote,
-                synthetic_samples=synthetic_samples,
-                feature_names=feature_names,
-                log_to_clearml=True,
-                iteration=2
-            )
+        with manifest_path.open("w", encoding="utf-8") as file:
+            json.dump(manifest, file, indent=2, ensure_ascii=False)
 
-            
-            self.visualiser.plot_data_scatter_tsne(
-                X_original=X_train_np,
-                y_original=y_train_np,
-                X_smote=X_train_smote,
-                y_smote=y_train_smote,
-                synthetic_samples=synthetic_samples,
-                feature_names=feature_names,
-                log_to_clearml=True,
-                iteration=2
-            )
-    def _prepare_predictions_data(self, final_results: Dict) -> Dict:
-        roc_predictions = {}
-
-        for clf_name, clf_results in final_results.items():
-            if 'original_data' in clf_results and 'smote_data' in clf_results:
-                roc_predictions[clf_name] = {}
-                roc_predictions[clf_name]['original'] = clf_results['original_data']['y_pred_proba']
-                roc_predictions[clf_name]['smote'] = clf_results['smote_data']['y_pred_proba']
-
-        roc_predictions = {k: v for k, v in roc_predictions.items() if v}
-
-        return {'roc_predictions': roc_predictions}
-
-    def _create_results_visualisations(self, final_results: Dict,
-                                       y_test: np.ndarray,
-                                       dataset_name: str,
-                                       smote_algorithm: Any
-                                       ):
-        predictions_data = self._prepare_predictions_data(final_results)
-
-        # ROC ������
-        if predictions_data['roc_predictions'] and self.config.enable_roc_curves:
-            self.visualiser.plot_roc_curves(
-                y_test=y_test,
-                predictions=predictions_data['roc_predictions'],
-                title=f"ROC",
-                clearml_task=self.task,
-                method_name=smote_algorithm.__class__.__name__,
-                iteration=3
-            )
-
-        # Precision-Recall ������
-        if predictions_data['roc_predictions'] and self.config.enable_precision_recall_curves:
-            self.visualiser.plot_precision_recall_curves(
-                y_test=y_test,
-                predictions=predictions_data['roc_predictions'],
-                title=f"PR",
-                clearml_task=self.task,
-                method_name=smote_algorithm.__class__.__name__,
-                iteration=3
-            )
-
-    def _log_dataset_info(self, X, y):
+    def _log_dataset_info(self, x_data, y_data):
         if not self.task:
             return
 
-        logger = self.task.get_logger()
-        class_dist = np.bincount(y)
-        imbalance_ratio = max(class_dist) / min(class_dist) if min(class_dist) > 0 else float('inf')
+        class_dist = np.bincount(np.asarray(y_data))
+        imbalance_ratio = max(class_dist) / min(class_dist) if min(class_dist) > 0 else float("inf")
 
-        logger.report_scalar("Dataset Info", "Total Samples", len(X), iteration=0)
-        logger.report_scalar("Dataset Info", "Features", X.shape[1], iteration=0)
+        logger = self.task.get_logger()
+        logger.report_scalar("Dataset Info", "Total Samples", len(x_data), iteration=0)
+        logger.report_scalar("Dataset Info", "Features", x_data.shape[1], iteration=0)
         logger.report_scalar("Dataset Info", "Classes", len(class_dist), iteration=0)
         logger.report_scalar("Dataset Info", "Imbalance Ratio", imbalance_ratio, iteration=0)
 
-    def _cross_validation_with_smote(self,
-                                     X_train: np.ndarray,
-                                     y_train: np.ndarray,
-                                     smote_algorithm: Any,
-                                     classifiers: Dict[str, Any]
-                                     ) -> Dict[str, Any]:
-        logging.getLogger('smote_variants').setLevel(logging.WARNING)
-
+    def _cross_validation_with_smote(
+        self,
+        x_train: pd.DataFrame,
+        y_train: pd.Series,
+        smote_algorithm: Any,
+        classifiers: Dict[str, Any],
+    ) -> Tuple[Dict[str, Any], Dict[str, Dict[str, List[float]]]]:
         cv = StratifiedKFold(
             n_splits=self.config.cv_folds,
             shuffle=True,
-            random_state=self.config.random_state
+            random_state=self.config.random_state,
         )
 
-        cv_results = {}
-        current_iteration = 0
-        all_fold_results = []
+        cv_summary: Dict[str, Any] = {}
+        raw_scores: Dict[str, Dict[str, List[float]]] = {}
 
         for clf_name, classifier in classifiers.items():
-            cv_scores = {metric: [] for metric in self.config.priority_metrics}
+            metric_scores: Dict[str, List[float]] = {
+                metric: [] for metric in self.config.priority_metrics
+            }
 
-            for fold, (train_idx, val_idx) in enumerate(cv.split(X_train, y_train)):
-                current_iteration += 1
+            for fold_idx, (train_idx, val_idx) in enumerate(cv.split(x_train, y_train), start=1):
+                x_fold_train = x_train.iloc[train_idx].values
+                x_fold_val = x_train.iloc[val_idx].values
+                y_fold_train = y_train.iloc[train_idx].values
+                y_fold_val = y_train.iloc[val_idx].values
 
-                X_fold_train, X_fold_val = X_train.iloc[train_idx].values, X_train.iloc[val_idx].values
-                y_fold_train, y_fold_val = y_train.iloc[train_idx].values, y_train.iloc[val_idx].values
+                x_fold_smote, y_fold_smote = smote_algorithm.fit_resample(x_fold_train, y_fold_train)
 
-                X_fold_train_smote, y_fold_train_smote = smote_algorithm.fit_resample(
-                    X_fold_train, y_fold_train
-                )
-
-                if fold == 0 and self.task:
-                    original_size = len(y_fold_train)
-                    smote_size = len(y_fold_train_smote)
-                    logger = self.task.get_logger()
-
-                classifier.fit(X_fold_train_smote, y_fold_train_smote)
-                y_pred = classifier.predict(X_fold_val)
+                classifier.fit(x_fold_smote, y_fold_smote)
+                y_pred = classifier.predict(x_fold_val)
 
                 y_pred_proba = None
-                if hasattr(classifier, 'predict_proba'):
-                    y_pred_proba = classifier.predict_proba(X_fold_val)[:, 1]
+                if hasattr(classifier, "predict_proba"):
+                    y_pred_proba = classifier.predict_proba(x_fold_val)[:, 1]
 
-                fold_metrics = all_smote_metrics(
-                    y_fold_val, y_pred, y_pred_proba
-                )
-
+                fold_metrics = all_smote_metrics(y_fold_val, y_pred, y_pred_proba)
                 for metric in self.config.priority_metrics:
                     if metric in fold_metrics:
-                        cv_scores[metric].append(fold_metrics[metric])
-
-                fold_result = {
-                    'Classifier': clf_name,
-                    'Fold': fold + 1,
-                    'Train_Samples': len(y_fold_train_smote),
-                    'Val_Samples': len(y_fold_val)
-                }
-                fold_result.update({
-                    metric: fold_metrics.get(metric, 0)
-                    for metric in self.config.priority_metrics
-                })
-                all_fold_results.append(fold_result)
+                        metric_scores[metric].append(float(fold_metrics[metric]))
 
                 if self.task:
-                    logger = self.task.get_logger()
                     for metric in self.config.priority_metrics:
                         if metric in fold_metrics:
-                            logger.report_scalar(
+                            self.task.get_logger().report_scalar(
                                 f"CV Fold Results - {clf_name}",
                                 metric,
                                 fold_metrics[metric],
-                                iteration=fold + 1
+                                iteration=fold_idx,
                             )
 
-            cv_results[clf_name] = {}
+            raw_scores[clf_name] = metric_scores
+            cv_summary[clf_name] = {}
+            for metric, values in metric_scores.items():
+                if values:
+                    cv_summary[clf_name][f"{metric}_mean"] = float(np.mean(values))
+                    cv_summary[clf_name][f"{metric}_std"] = float(np.std(values))
+
+        return cv_summary, raw_scores
+
+    def _compute_cv_delta_stats(
+        self,
+        baseline_scores: Dict[str, Dict[str, List[float]]],
+        method_scores: Dict[str, Dict[str, List[float]]],
+    ) -> Dict[str, Dict[str, Dict[str, float]]]:
+        delta_stats: Dict[str, Dict[str, Dict[str, float]]] = {}
+
+        for clf_name, baseline_metrics in baseline_scores.items():
+            if clf_name not in method_scores:
+                continue
+
+            delta_stats[clf_name] = {}
             for metric in self.config.priority_metrics:
-                if cv_scores[metric]:
-                    mean_score = np.mean(cv_scores[metric])
-                    std_score = np.std(cv_scores[metric])
-                    cv_results[clf_name][f'{metric}_mean'] = mean_score
-                    cv_results[clf_name][f'{metric}_std'] = std_score
+                base_vals = baseline_metrics.get(metric, [])
+                method_vals = method_scores[clf_name].get(metric, [])
 
-                    if self.task:
-                        logger = self.task.get_logger()
-                        logger.report_scalar(
-                            f"CV Summary - {metric}",
-                            f"{clf_name}_mean",
-                            mean_score,
-                            iteration=1
-                        )
-                        logger.report_scalar(
-                            f"CV Summary - {metric}",
-                            f"{clf_name}_std",
-                            std_score,
-                            iteration=1
-                        )
+                if not base_vals or not method_vals:
+                    continue
 
-        return cv_results
+                paired_len = min(len(base_vals), len(method_vals))
+                deltas = np.array(method_vals[:paired_len]) - np.array(base_vals[:paired_len])
+                if deltas.size == 0:
+                    continue
 
-    def _final_evaluation(self,
-                          X_train: np.ndarray, y_train: np.ndarray,
-                          X_test: np.ndarray, y_test: np.ndarray,
-                          smote_algorithm: Any,
-                          classifiers: Dict[str, Any],
-                          dataset_name: str
-                          ) -> Dict[str, Any]:
+                q75, q25 = np.percentile(deltas, [75, 25])
+                delta_stats[clf_name][metric] = {
+                    "delta_mean": float(np.mean(deltas)),
+                    "delta_std": float(np.std(deltas)),
+                    "delta_median": float(np.median(deltas)),
+                    "delta_iqr": float(q75 - q25),
+                    "positive_delta_rate": float(np.mean(deltas > 0)),
+                }
 
-        logging.getLogger('smote_variants').setLevel(logging.WARNING)
-        X_train_smote, y_train_smote = smote_algorithm.fit_resample(X_train.values, y_train.values)
+        return delta_stats
 
-        final_results = {}
+    def _final_evaluation(
+        self,
+        x_train: pd.DataFrame,
+        y_train: pd.Series,
+        x_test: pd.DataFrame,
+        y_test: pd.Series,
+        smote_algorithm: Any,
+        classifiers: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        x_train_smote, y_train_smote = smote_algorithm.fit_resample(x_train.values, y_train.values)
 
+        final_results: Dict[str, Any] = {}
         for clf_name, classifier in classifiers.items():
-            classifier_original = type(classifier)(**classifier.get_params())
-            classifier_original.fit(X_train, y_train)
-            y_pred_original = classifier_original.predict(X_test)
+            clf_original = type(classifier)(**classifier.get_params())
+            clf_original.fit(x_train, y_train)
+            y_pred_original = clf_original.predict(x_test)
 
-            classifier_smote = type(classifier)(**classifier.get_params())
-            classifier_smote.fit(X_train_smote, y_train_smote)
-            y_pred_smote = classifier_smote.predict(X_test)
+            clf_smote = type(classifier)(**classifier.get_params())
+            clf_smote.fit(x_train_smote, y_train_smote)
+            y_pred_smote = clf_smote.predict(x_test)
 
             y_pred_proba_original = None
             y_pred_proba_smote = None
+            if hasattr(clf_original, "predict_proba"):
+                y_pred_proba_original = clf_original.predict_proba(x_test)[:, 1]
+                y_pred_proba_smote = clf_smote.predict_proba(x_test)[:, 1]
 
-            if hasattr(classifier_original, 'predict_proba') and hasattr(classifier_smote, 'predict_proba'):
-                y_pred_proba_original = classifier_original.predict_proba(X_test)[:, 1]
-                y_pred_proba_smote = classifier_smote.predict_proba(X_test)[:, 1]
+            metrics_original = all_smote_metrics(y_test, y_pred_original, y_pred_proba_original)
+            metrics_smote = all_smote_metrics(y_test, y_pred_smote, y_pred_proba_smote)
 
-            metrics_original = all_smote_metrics(
-                y_test, y_pred_original, y_pred_proba_original
-            )
-
-            metrics_smote = all_smote_metrics(
-                y_test, y_pred_smote, y_pred_proba_smote
-            )
-
-            improvements = {
-                metric: metrics_smote[metric] - metrics_original[metric]
-                for metric in metrics_original.keys()
+            improvement = {
+                metric: float(metrics_smote[metric] - metrics_original[metric])
+                for metric in metrics_original
                 if metric in metrics_smote
             }
 
             final_results[clf_name] = {
-                'original_data': {
+                "original_data": {
                     **metrics_original,
-                    'y_pred': y_pred_original,
-                    'y_pred_proba': y_pred_proba_original,
+                    "y_pred": y_pred_original,
+                    "y_pred_proba": y_pred_proba_original,
                 },
-                'smote_data': {
+                "smote_data": {
                     **metrics_smote,
-                    'y_pred': y_pred_smote,
-                    'y_pred_proba': y_pred_proba_smote,
+                    "y_pred": y_pred_smote,
+                    "y_pred_proba": y_pred_proba_smote,
                 },
-                'improvement': improvements,
+                "improvement": improvement,
             }
 
             if self.task:
-                logger = self.task.get_logger()
                 for metric in self.config.priority_metrics:
                     if metric in metrics_original:
-                        logger.report_scalar(
-                            f"Final Test - Original",
+                        self.task.get_logger().report_scalar(
+                            "Final Test - Original",
                             f"{clf_name}_{metric}",
                             metrics_original[metric],
-                            iteration=1
+                            iteration=1,
                         )
-
                     if metric in metrics_smote:
-                        logger.report_scalar(
-                            f"Final Test - SMOTE",
+                        self.task.get_logger().report_scalar(
+                            "Final Test - SMOTE",
                             f"{clf_name}_{metric}",
                             metrics_smote[metric],
-                            iteration=1
+                            iteration=1,
                         )
 
-                        logger.report_scalar(
-                            f"Final Test - Improvement",
-                            f"{clf_name}_{metric}",
-                            improvements[metric],
-                            iteration=1
-                        )
-
-        n_original = len(X_train)
-        synthetic_samples = X_train_smote[n_original:] if len(X_train_smote) > n_original else None
-
+        n_original = len(x_train)
+        synthetic_samples = x_train_smote[n_original:] if len(x_train_smote) > n_original else None
         self._create_data_scatter_visualisation(
-            X_train, y_train, X_train_smote, y_train_smote, synthetic_samples
+            x_train,
+            y_train,
+            x_train_smote,
+            y_train_smote,
+            synthetic_samples,
         )
 
         return final_results
 
-    def _create_metrics_summary_table(self, final_result: Dict[str, Any],
-                                      dataset_name: str,
-                                      smote_algorithm: Any,
-                                      iteration: int = 1
-                                      ) -> pd.DataFrame:
-        table_data = []
+    def _create_data_scatter_visualisation(
+        self,
+        x_train: pd.DataFrame,
+        y_train: pd.Series,
+        x_train_smote: np.ndarray,
+        y_train_smote: np.ndarray,
+        synthetic_samples: Optional[np.ndarray],
+    ):
+        if not self.task or not self.config.enable_scatter_plots:
+            return
+
+        try:
+            x_np = x_train.values if hasattr(x_train, "values") else x_train
+            y_np = y_train.values if hasattr(y_train, "values") else y_train
+            feature_names = [f"Feature {idx + 1}" for idx in range(x_np.shape[1])]
+
+            self.visualiser.plot_data_scatter(
+                X_original=x_np,
+                y_original=y_np,
+                X_smote=x_train_smote,
+                y_smote=y_train_smote,
+                synthetic_samples=synthetic_samples,
+                feature_names=feature_names,
+                log_to_clearml=True,
+                iteration=2,
+            )
+            self.visualiser.plot_data_scatter_tsne(
+                X_original=x_np,
+                y_original=y_np,
+                X_smote=x_train_smote,
+                y_smote=y_train_smote,
+                synthetic_samples=synthetic_samples,
+                feature_names=feature_names,
+                log_to_clearml=True,
+                iteration=2,
+            )
+        except Exception as exc:
+            logging.warning("Scatter visualisation skipped: %s", exc)
+
+    def _prepare_predictions_data(self, final_results: Dict[str, Any]) -> Dict[str, Dict[str, np.ndarray]]:
+        roc_predictions: Dict[str, Dict[str, np.ndarray]] = {}
+        for clf_name, clf_results in final_results.items():
+            original = clf_results.get("original_data", {}).get("y_pred_proba")
+            smote = clf_results.get("smote_data", {}).get("y_pred_proba")
+            if original is None or smote is None:
+                continue
+            roc_predictions[clf_name] = {"original": original, "smote": smote}
+        return roc_predictions
+
+    def _create_results_visualisations(
+        self,
+        final_results: Dict[str, Any],
+        y_test: pd.Series,
+        smote_algorithm: Any,
+    ):
+        if not self.task:
+            return
+
+        predictions_data = self._prepare_predictions_data(final_results)
+        if not predictions_data:
+            return
+
+        if self.config.enable_roc_curves:
+            self.visualiser.plot_roc_curves(
+                y_test=np.asarray(y_test),
+                predictions=predictions_data,
+                title="ROC",
+                clearml_task=self.task,
+                method_name=smote_algorithm.__class__.__name__,
+                iteration=3,
+            )
+
+        if self.config.enable_precision_recall_curves:
+            self.visualiser.plot_precision_recall_curves(
+                y_test=np.asarray(y_test),
+                predictions=predictions_data,
+                title="PR",
+                clearml_task=self.task,
+                method_name=smote_algorithm.__class__.__name__,
+                iteration=3,
+            )
+
+    def _create_metrics_summary_table(
+        self,
+        final_result: Dict[str, Any],
+        smote_algorithm: Any,
+    ) -> pd.DataFrame:
+        table_data: List[Dict[str, Any]] = []
 
         for clf_name, clf_results in final_result.items():
-            original_data = clf_results.get('original_data', {})
-            smote_data = clf_results.get('smote_data', {})
-            improvements = clf_results.get('improvement', {})
+            original_data = clf_results.get("original_data", {})
+            smote_data = clf_results.get("smote_data", {})
+            improvements = clf_results.get("improvement", {})
 
             for metric in self.config.priority_metrics:
-                if metric in original_data and metric in smote_data:
-                    orig_val = original_data[metric]
-                    smote_val = smote_data[metric]
-                    improv = improvements.get(metric, 0)
-                    improv_pct = (improv / orig_val * 100) if orig_val != 0 else 0
+                if metric not in original_data or metric not in smote_data:
+                    continue
 
-                    table_data.append({
-                        'Classifier': clf_name,
-                        'Metric': metric,
-                        'Original': round(orig_val, 4),
-                        f'{smote_algorithm.__class__.__name__}': round(smote_val, 4),
-                        'Delta_Absolute': round(improv, 4),
-                        'Delta_Percent': round(improv_pct, 2)
-                    })
+                orig_val = original_data[metric]
+                smote_val = smote_data[metric]
+                delta_abs = improvements.get(metric, 0.0)
+                delta_pct = (delta_abs / orig_val * 100) if orig_val != 0 else 0.0
 
-        df = pd.DataFrame(table_data)
+                table_data.append(
+                    {
+                        "Classifier": clf_name,
+                        "Metric": metric,
+                        "Original": round(orig_val, 4),
+                        smote_algorithm.__class__.__name__: round(smote_val, 4),
+                        "Delta_Absolute": round(delta_abs, 4),
+                        "Delta_Percent": round(delta_pct, 2),
+                    }
+                )
 
-        if self.task:
-            logger = self.task.get_logger()
-            logger.report_table(
+        summary_df = pd.DataFrame(table_data)
+        if self.task and not summary_df.empty:
+            self.task.get_logger().report_table(
                 title=f"Metrics Summary - {smote_algorithm.__class__.__name__}",
-                series=dataset_name,
-                iteration=iteration,
-                table_plot=df
+                series="summary",
+                iteration=1,
+                table_plot=summary_df,
             )
 
-        return df
+        return summary_df
 
-    def _save_experiment_artifacts(self,
-                                   experiment_results,
-                                   dataset_name,
-                                   smote_algorithm
-                                   ):
-        results_filename = f"results/experiment_results_{dataset_name}_{smote_algorithm.__class__.__name__}.json"
-
-        with open(results_filename, 'w', encoding='utf-8') as f:
-            json.dump(experiment_results, f, indent=2, ensure_ascii=False, default=str)
-
-        self.task.upload_artifact('experiment_results', results_filename)
-
-        self._save_results_csv(experiment_results, dataset_name, smote_algorithm)
-
-    def _save_results_csv(self,
-                          experiment_results,
-                          dataset_name,
-                          smote_algorithm
-                          ):
-
-        final_results = experiment_results.get('final_test_results', {})
-        csv_data = []
+    def _save_results_csv(
+        self,
+        experiment_results: Dict[str, Any],
+        dataset_name: str,
+        smote_algorithm: Any,
+        method_dir: Path,
+    ) -> Optional[Path]:
+        final_results = experiment_results.get("final_test_results", {})
+        csv_rows = []
 
         for clf_name, clf_results in final_results.items():
-            original_data = clf_results.get('original_data', {})
-            smote_data = clf_results.get('smote_data', {})
-            improvements = clf_results.get('improvement', {})
+            original_data = clf_results.get("original_data", {})
+            smote_data = clf_results.get("smote_data", {})
+            improvements = clf_results.get("improvement", {})
 
             for metric in self.config.priority_metrics:
                 if metric in original_data and metric in smote_data:
-                    csv_data.append({
-                        'Dataset': dataset_name,
-                        'SMOTE_Algorithm': smote_algorithm.__class__.__name__,
-                        'Classifier': clf_name,
-                        'Metric': metric,
-                        'Original_Score': original_data[metric],
-                        'SMOTE_Score': smote_data[metric],
-                        'Improvement': improvements.get(metric, 0),
-                        'Improvement_Percentage': (
-                                improvements.get(metric, 0) / original_data[metric] * 100
-                        ) if original_data[metric] != 0 else 0
-                    })
+                    original_score = original_data[metric]
+                    improvement = improvements.get(metric, 0.0)
+                    csv_rows.append(
+                        {
+                            "Run_ID": self.run_id,
+                            "Dataset": dataset_name,
+                            "SMOTE_Algorithm": smote_algorithm.__class__.__name__,
+                            "Classifier": clf_name,
+                            "Metric": metric,
+                            "Original_Score": original_score,
+                            "SMOTE_Score": smote_data[metric],
+                            "Improvement": improvement,
+                            "Improvement_Percentage": (improvement / original_score * 100)
+                            if original_score != 0
+                            else 0,
+                        }
+                    )
 
-        if csv_data:
-            csv_df = pd.DataFrame(csv_data)
-            os.makedirs(self.config.results_dir, exist_ok=True)
-            csv_filename = os.path.join(
-                self.config.results_dir,
-                f"results_summary_{dataset_name}_{smote_algorithm.__class__.__name__}.csv"
-            )
-            csv_df.to_csv(csv_filename, index=False, encoding='utf-8')
+        if not csv_rows:
+            return None
 
-            self.task.upload_artifact('results_summary_csv', csv_filename)
+        csv_df = pd.DataFrame(csv_rows)
+        csv_filename = method_dir / f"results_summary_{dataset_name}_{smote_algorithm.__class__.__name__}.csv"
+        csv_df.to_csv(csv_filename, index=False, encoding="utf-8")
+        return csv_filename
+
+    def _save_experiment_artifacts(
+        self,
+        experiment_results: Dict[str, Any],
+        dataset_name: str,
+        smote_algorithm: Any,
+    ) -> Dict[str, Path]:
+        run_root = self._run_root()
+        method_dir = run_root / dataset_name / smote_algorithm.__class__.__name__
+        method_dir.mkdir(parents=True, exist_ok=True)
+
+        json_path = method_dir / f"experiment_results_{dataset_name}_{smote_algorithm.__class__.__name__}.json"
+        with json_path.open("w", encoding="utf-8") as file:
+            json.dump(experiment_results, file, indent=2, ensure_ascii=False, default=str)
+
+        csv_path = self._save_results_csv(experiment_results, dataset_name, smote_algorithm, method_dir)
+
+        files = [str(json_path.relative_to(run_root))]
+        if csv_path is not None:
+            files.append(str(csv_path.relative_to(run_root)))
+
+        self._update_manifest(files)
+
+        if self.task and self.config.auto_log_artifacts:
+            self.task.upload_artifact("experiment_results", str(json_path))
+            if csv_path is not None:
+                self.task.upload_artifact("results_summary_csv", str(csv_path))
+
+        result_paths: Dict[str, Path] = {"json": json_path}
+        if csv_path is not None:
+            result_paths["csv"] = csv_path
+        return result_paths
 
     def close_task(self):
         if self.task:
             self.task.close()
+        self.task = None
+        self.logger = None
+        self.visualiser.set_clearml_task(None)
 
-    def run_single_experiment(self,
-                              dataset_name: str,
-                              smote_algorithm: Any,
-                              dataset_params: Optional[Dict] = None,
-                              method_params: Optional[Dict] = None,
-                              parent_task_id: Optional[str] = None,
-                              experiment_config: Optional[Dict] = None
-                              ) -> Dict[str, Any]:
-
+    def run_single_experiment(
+        self,
+        dataset_name: str,
+        smote_algorithm: Any,
+        dataset_params: Optional[Dict[str, Any]] = None,
+        method_params: Optional[Dict[str, Any]] = None,
+        parent_task_id: Optional[str] = None,
+        experiment_config: Optional[Dict[str, Any]] = None,
+        close_task_on_finish: bool = True,
+    ) -> Dict[str, Any]:
         experiment_name = f"{dataset_name} + {smote_algorithm.__class__.__name__}"
 
-        self._initialize_clearml_task()
-        self.visualiser.set_clearml_task(self.task)
-
-        if self.task and not self.config.clearml_task_name:
-            self.task.set_name(f"{experiment_name}")
-
+        self._initialize_clearml_task(task_name=experiment_name)
         if self.task and parent_task_id:
             self.task.set_parent(parent_task_id)
 
@@ -553,181 +604,272 @@ class ExperimentRunner:
         method_params = method_params or {}
 
         if self.task:
-            experiment_params = {
-                'dataset_name': dataset_name,
-                'smote_algorithm': smote_algorithm.__class__.__name__,
-                'experiment_config': experiment_config,
-                'dataset_params': dataset_params,
-                'method_params': method_params
-            }
-            self.task.connect(experiment_params, name='current_experiment_params')
+            self.task.connect(
+                {
+                    "dataset_name": dataset_name,
+                    "smote_algorithm": smote_algorithm.__class__.__name__,
+                    "experiment_config": experiment_config,
+                    "dataset_params": dataset_params,
+                    "method_params": method_params,
+                    "run_id": self.run_id,
+                },
+                name="current_experiment_params",
+            )
             self.task.add_tags([dataset_name, smote_algorithm.__class__.__name__])
 
-        preprocess = dataset_params.get('preprocessed', False)
-
+        preprocess = bool(dataset_params.get("preprocessed", False))
         df, metadata = fetch_dataset(dataset_name, preprocess)
-        target = df.columns.tolist()[-1]
-        X = df.drop([target], axis=1)
-        y = df.iloc[:, -1]
 
-        if self.task:
-            self._log_dataset_info(X, y)
+        target_col = df.columns.tolist()[-1]
+        x_data = df.drop([target_col], axis=1)
+        y_data = df.iloc[:, -1]
 
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y,
+        self._log_dataset_info(x_data, y_data)
+
+        x_train, x_test, y_train, y_test = train_test_split(
+            x_data,
+            y_data,
             test_size=self.config.test_size,
-            stratify=y,
-            random_state=self.config.random_state
+            stratify=y_data,
+            random_state=self.config.random_state,
         )
 
         classifiers = self.classifier_pool.get_classifiers()
         selected_classifiers = {
-            name: clf for name, clf in classifiers.items()
-            if name in self.config.selected_classifiers
+            name: clf for name, clf in classifiers.items() if name in self.config.selected_classifiers
         }
+        if not selected_classifiers:
+            raise ValueError("No classifiers selected for experiment run")
 
-        cv_imbalanced_results = self._cross_validation_with_smote(
-            X_train, y_train, sv.NoSMOTE(), selected_classifiers
+        baseline_cv_results, baseline_raw_scores = self._cross_validation_with_smote(
+            x_train,
+            y_train,
+            sv.NoSMOTE(),
+            selected_classifiers,
         )
 
-        cv_results = self._cross_validation_with_smote(
-            X_train, y_train, smote_algorithm, selected_classifiers
+        method_cv_results, method_raw_scores = self._cross_validation_with_smote(
+            x_train,
+            y_train,
+            smote_algorithm,
+            selected_classifiers,
         )
+
+        cv_delta_stats = self._compute_cv_delta_stats(baseline_raw_scores, method_raw_scores)
 
         final_results = self._final_evaluation(
-            X_train, y_train, X_test, y_test,
-            smote_algorithm, selected_classifiers, dataset_name=dataset_name
+            x_train,
+            y_train,
+            x_test,
+            y_test,
+            smote_algorithm,
+            selected_classifiers,
         )
 
-        self._create_metrics_summary_table(final_results, dataset_name, smote_algorithm)
-        self._create_results_visualisations(final_results, y_test, dataset_name, smote_algorithm)
+        self._create_metrics_summary_table(final_results, smote_algorithm)
+        self._create_results_visualisations(final_results, y_test, smote_algorithm)
 
         experiment_results = {
-            'metadata': {
-                'dataset_name': dataset_name,
-                'algorithm_name': smote_algorithm.__class__.__name__,
-                'dataset_params': dataset_params,
-                'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
-                'clearml_task_id': self.task.id if self.task else None
+            "metadata": {
+                "run_id": self.run_id,
+                "dataset_name": dataset_name,
+                "algorithm_name": smote_algorithm.__class__.__name__,
+                "dataset_params": dataset_params,
+                "method_params": method_params,
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "clearml_task_id": self.task.id if self.task else None,
             },
-            'dataset_info': {
-                'total_samples': len(X),
-                'features': X.shape[1],
-                'train_samples': len(X_train),
-                'test_samples': len(X_test),
-                'original_class_distribution': np.bincount(y).tolist(),
-                'train_class_distribution': np.bincount(y_train).tolist()
+            "dataset_info": {
+                "total_samples": len(x_data),
+                "features": x_data.shape[1],
+                "train_samples": len(x_train),
+                "test_samples": len(x_test),
+                "original_class_distribution": np.bincount(np.asarray(y_data)).tolist(),
+                "train_class_distribution": np.bincount(np.asarray(y_train)).tolist(),
             },
-            'cross_validation_imbalanced_results': cv_imbalanced_results,
-            'cross_validation_results': cv_results,
-            'final_test_results': final_results,
+            "cross_validation_imbalanced_results": baseline_cv_results,
+            "cross_validation_results": method_cv_results,
+            "cross_validation_delta_stats": cv_delta_stats,
+            "final_test_results": final_results,
+            "dataset_metadata": metadata,
         }
 
-        if self.task and self.config.auto_log_artifacts:
+        if self.config.save_results:
             self._save_experiment_artifacts(experiment_results, dataset_name, smote_algorithm)
 
-        self.close_task()
+        if close_task_on_finish and self.create_clearml_task:
+            self.close_task()
 
         return experiment_results
 
-    def get_row(self, results, cv, classifier, algorithm_name, priority_metrics):
+    def get_row(
+        self,
+        results: Dict[str, Any],
+        cv_key: str,
+        classifier: str,
+        algorithm_name: str,
+        priority_metrics: List[str],
+    ) -> List[str]:
         clf_rename = {
-            'CatBoost': 'CB',
-            'RandomForest': 'RF',
-            'SVM': 'SVM',
-            'kNN': 'kNN',
-            'LogisticRegression': 'LR',
-            'DecisionTree': 'DT',
-            'NaiveBayes': 'NB'
+            "CatBoost": "CB",
+            "RandomForest": "RF",
+            "SVM": "SVM",
+            "kNN": "kNN",
+            "LogisticRegression": "LR",
+            "DecisionTree": "DT",
+            "NaiveBayes": "NB",
         }
-        row = [algorithm_name, clf_rename[classifier]]
-        cv_results = results[cv][classifier]
+
+        row = [algorithm_name, clf_rename.get(classifier, classifier)]
+        cv_results = results[cv_key][classifier]
         for metric in priority_metrics:
-            str = f'{cv_results[f"{metric}_mean"]:.4f}'
-            row.append(str)
+            row.append(f"{cv_results[f'{metric}_mean']:.4f}")
         return row
 
-    def make_tables(self, datasets, methods, results, experiment_config):
-        logger = self.task.get_logger()
-        priority_metrics = list(experiment_config['priority_metrics'])
-        selected_classifiers = experiment_config['selected_classifiers']
-        columns = ['Method', 'Classificator'] + priority_metrics
-        for dataset in datasets:
-            rows = []
-            dataset_count = 0
-            for result in results:
-                if dataset == result['metadata']['dataset_name']:
-                    dataset_count += 1
-                    if dataset_count == 1:
-                        for classifier in selected_classifiers:
-                            rows.append(self.get_row(result, 'cross_validation_imbalanced_results', classifier, 'Original', priority_metrics))
-                    algorithm_name = result['metadata']['algorithm_name']
-                    for classifier in selected_classifiers:
-                        rows.append(self.get_row(result, 'cross_validation_results', classifier, algorithm_name, priority_metrics))
-            df = pd.DataFrame(rows, columns=columns)
-            logger.report_table(
-                title=f'{dataset} results',
-                series='Table',
-                iteration=0,
-                table_plot=df
-            )
+    def make_tables(
+        self,
+        results: List[Dict[str, Any]],
+        experiment_config: Dict[str, Any],
+    ) -> pd.DataFrame:
+        priority_metrics = list(experiment_config["priority_metrics"])
+        selected_classifiers = list(experiment_config["selected_classifiers"])
 
-    def aggregate_results(self, results, experiment_config):
-        experiment_name = "results"
-
-        self._initialize_clearml_task()
-        self.visualiser.set_clearml_task(self.task)
-
-        if self.task and not self.config.clearml_task_name:
-            self.task.set_name(f"{experiment_name}")
-
-        datasets = []
-        methods = []
-
+        rows: List[Dict[str, Any]] = []
         for result in results:
-            datasets.append(result['metadata']['dataset_name'])
-            methods.append(result['metadata']['algorithm_name'])
+            dataset = result["metadata"]["dataset_name"]
+            method = result["metadata"]["algorithm_name"]
+            delta_stats = result.get("cross_validation_delta_stats", {})
 
-        datasets = datasets
-        methods = methods
+            for classifier in selected_classifiers:
+                for metric in priority_metrics:
+                    base_mean = result["cross_validation_imbalanced_results"].get(classifier, {}).get(
+                        f"{metric}_mean"
+                    )
+                    method_mean = result["cross_validation_results"].get(classifier, {}).get(
+                        f"{metric}_mean"
+                    )
+                    final_original = result["final_test_results"].get(classifier, {}).get(
+                        "original_data", {}
+                    ).get(metric)
+                    final_smote = result["final_test_results"].get(classifier, {}).get(
+                        "smote_data", {}
+                    ).get(metric)
 
-        if self.task:
-            experiment_params = {
-                'datasets': datasets,
-                'methods': methods
-            }
-            self.task.connect(experiment_params, name='Data')
-            self.task.add_tags(['Results', 'Figures'])
+                    if base_mean is None or method_mean is None:
+                        continue
 
-        self.make_tables(datasets, methods, results, experiment_config)
+                    delta_mean = delta_stats.get(classifier, {}).get(metric, {}).get("delta_mean")
+                    positive_rate = delta_stats.get(classifier, {}).get(metric, {}).get(
+                        "positive_delta_rate"
+                    )
 
-        self.close_task()
+                    rows.append(
+                        {
+                            "Run_ID": self.run_id,
+                            "Dataset": dataset,
+                            "Method": method,
+                            "Classifier": classifier,
+                            "Metric": metric,
+                            "Baseline_CV_Mean": base_mean,
+                            "Method_CV_Mean": method_mean,
+                            "CV_Delta": method_mean - base_mean,
+                            "CV_Delta_Mean": delta_mean,
+                            "CV_Positive_Delta_Rate": positive_rate,
+                            "Final_Original": final_original,
+                            "Final_SMOTE": final_smote,
+                            "Final_Delta": (final_smote - final_original)
+                            if final_original is not None and final_smote is not None
+                            else None,
+                        }
+                    )
 
-    def direct_experiments(self, config_name: str):
+        return pd.DataFrame(rows)
 
-        logging.getLogger(sv.__name__).setLevel(logging.WARNING)
+    def aggregate_results(self, results: List[Dict[str, Any]], experiment_config: Dict[str, Any]):
+        summary_df = self.make_tables(results, experiment_config)
+        run_root = self._run_root()
+        run_root.mkdir(parents=True, exist_ok=True)
 
-        loader = ConfigLoader(config_name)
-        cfg = loader.load()
+        summary_csv = run_root / "summary.csv"
+        summary_json = run_root / "summary.json"
 
-        experiment_config = cfg['experiment_config']
+        summary_df.to_csv(summary_csv, index=False, encoding="utf-8")
+        summary_json.write_text(summary_df.to_json(orient="records", force_ascii=False), encoding="utf-8")
 
-        datasets_name = list(cfg['datasets'])
-        datasets_params = cfg['datasets_params']
+        self._update_manifest(
+            [
+                str(summary_csv.relative_to(run_root)),
+                str(summary_json.relative_to(run_root)),
+            ],
+            extra={
+                "datasets": sorted({result["metadata"]["dataset_name"] for result in results}),
+                "methods": sorted({result["metadata"]["algorithm_name"] for result in results}),
+                "finished_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            },
+        )
 
-        oversamplers_names = list(cfg['methods'])
+        if self.create_clearml_task:
+            self._initialize_clearml_task(task_name=f"results_{self.run_id}")
+            if self.task and not summary_df.empty:
+                self.task.get_logger().report_table(
+                    title="Aggregated Results",
+                    series="summary",
+                    iteration=0,
+                    table_plot=summary_df,
+                )
+                self.task.upload_artifact("summary_csv", str(summary_csv))
+                self.task.upload_artifact("summary_json", str(summary_json))
+            self.close_task()
 
-        oversamplers_config_name = 'methods.yaml'
-        oversamplers_loader = ConfigLoader(oversamplers_config_name)
-        oversamplers_config = oversamplers_loader.load()
+    def direct_experiments(
+        self,
+        config_name: Optional[str] = None,
+        config_data: Optional[Dict[str, Any]] = None,
+        methods_registry: Optional[Dict[str, MethodDefinitionModel]] = None,
+    ) -> List[Dict[str, Any]]:
+        if config_data is None:
+            if not config_name:
+                raise ValueError("config_name must be provided when config_data is None")
+            cfg = ConfigLoader(config_name).load()
+        else:
+            cfg = config_data
 
-        general_results = []
+        experiment_config = cfg["experiment_config"]
+        datasets_name = list(cfg.get("datasets", []))
+        datasets_params = dict(cfg.get("datasets_params", {}))
 
-        for oversampler_name in oversamplers_names:
-            oversampler = eval(oversamplers_config[oversampler_name]['method'])
+        raw_methods = cfg.get("methods", [])
+        method_params_overrides: Dict[str, Dict[str, Any]] = {}
+
+        if isinstance(raw_methods, dict):
+            oversampler_names = list(raw_methods.keys())
+            for method_name, method_cfg in raw_methods.items():
+                method_params_overrides[method_name] = dict((method_cfg or {}).get("params", {}))
+        else:
+            oversampler_names = list(raw_methods)
+
+        if not datasets_name:
+            raise ValueError("No datasets configured for benchmark run")
+        if not oversampler_names:
+            raise ValueError("No methods configured for benchmark run")
+        if methods_registry is None:
+            raise ValueError("methods_registry is required for direct_experiments")
+
+        general_results: List[Dict[str, Any]] = []
+        for method_name in oversampler_names:
+            method_overrides = method_params_overrides.get(method_name)
+            oversampler = build_method(method_name, methods_registry, method_overrides)
+
             for dataset_name in datasets_name:
-                results = self.run_single_experiment(dataset_name, oversampler, datasets_params,
-                                                     experiment_config=experiment_config)
-                general_results.append(results)
+                result = self.run_single_experiment(
+                    dataset_name=dataset_name,
+                    smote_algorithm=oversampler,
+                    dataset_params=datasets_params,
+                    method_params=method_overrides,
+                    experiment_config=experiment_config,
+                    close_task_on_finish=True,
+                )
+                general_results.append(result)
 
         self.aggregate_results(general_results, experiment_config)
+        return general_results
